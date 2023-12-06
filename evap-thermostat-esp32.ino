@@ -231,7 +231,7 @@ void renderAllMemoized(bool force = false) {
     lastHighFanIsOn = state.highFanIsOn;
   }
   if (force || state.pumpIsOn != lastPumpIsOn) {
-    renderBar('P', !state.pumpIsSelected);
+    renderBar('P', !state.pumpIsOn);
     lastPumpIsOn = state.pumpIsOn;
   }
   if (force || state.lowFanIsSelected != lastLowFanIsSelected) {
@@ -327,6 +327,7 @@ void turnFanOn() {
 void turnPumpOff() {
   digitalWrite(PUMP_PIN, LOW);
   state.pumpIsOn = false;
+  renderPumpDelay(-1); // clear pump delay
 }
 void renderPumpDelay(int remainingMs) {
   // Renders the pump delay in the lower right corner of the display
@@ -347,7 +348,8 @@ void renderPumpDelay(int remainingMs) {
 
 }
 void turnPumpOn() {
-  static long lastPumpOnTime = -60000; // set as 1 minute prior to startup so pump can engage
+  static long lastPumpOnTime = -60000; // set as 1 minute prior to startup so pump can engage immediately
+  renderPumpDelay(-1); // clear pump delay
 
   if (state.humidity >= HIGH_HUMIDITY_THRESHOLD || !state.pumpIsSelected) { // ensure it doesn't get too humid indoors
     turnPumpOff();
@@ -359,13 +361,12 @@ void turnPumpOn() {
     }
     return;
   }
+
+  // passed guards, turn pump on
   if (state.pumpIsSelected && !state.pumpIsOn) {
     digitalWrite(PUMP_PIN, HIGH);
     state.pumpIsOn = true;
     lastPumpOnTime = millis();
-
-    // clear pump delay
-    renderPumpDelay(-1);
   }
 }
 void turnCoolerOn() {
