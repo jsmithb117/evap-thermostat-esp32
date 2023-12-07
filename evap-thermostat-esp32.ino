@@ -462,17 +462,25 @@ void wifiLoop() {
 }
 
 void mqttCallback(char *topic, byte *payload, unsigned int length) {
+  // handles subscribed mqtt messages
   Serial.print("Message arrived from topic: ");
   Serial.println(topic);
-  // when UPDATE_SET_TEMP message is received, update setTemp
   if (strcmp(topic, UPDATE_SET_TEMP) == 0) {
     // convert payload to float and assign to setTempF
     char *temp = (char *)payload;
-    state.setTempF = atof(temp);
+    float newSetTempF = atof(temp);
+
+    // if newSetTempF is invalid, read setTempF from potentiometer
+    if (newSetTempF < 65.0 || newSetTempF > 85.0) {
+      newSetTempF = thb.readSetTempF();
+    } else {
+      state.setTempF = newSetTempF;
+    }
+    renderSetTemp();
+    display.display();
     Serial.print("Set temp updated to: ");
     Serial.println(state.setTempF);
   }
-
 }
 void mqttInit() {
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
@@ -480,28 +488,45 @@ void mqttInit() {
   mqttConnect();
 }
 void mqttConnect() {
+  Serial.println("Connecting to MQTT");
+
+  static long lastMqttConnectAttempt = -5000; // set as 5 seconds prior to startup so mqtt can connect immediately
   const char* constClientId = finalClientId;
-  mqttClient.connect(constClientId, MQTT_USER, MQTT_PW);
+
+  // connect to mqtt, set last will and testament
+  if (lastMqttConnectAttempt + 5000 < millis() && mqttClient.connect(constClientId, MQTT_USER, MQTT_PW, STATUS_TOPIC, 0, 1, "0")) {
+    Serial.println("MQTT connected");
+    lastMqttConnectAttempt = millis();
+    // resubscribe to topics
+    for (int i = 0; i < sizeof(SUBSCRIBE_TOPICS) / sizeof(SUBSCRIBE_TOPICS[0]); i++) {
+      Serial.print("Subscribing to topic: ");
+      Serial.println(SUBSCRIBE_TOPICS[i]);
+      mqttClient.subscribe(SUBSCRIBE_TOPICS[i]);
+    }
+    // add status message to queue, signaling that this device is online
+    messageQueue.enqueue(STATUS_TOPIC, "1");
+    // publish messages from queue
+    while (!messageQueue.isEmpty()) {
+      Message message = messageQueue.dequeue();
+      if (!mqttClient.publish(message.topic, message.payload)) {
+        // publish failed, re-enqueue message and break to allow reconnect on next loop
+        Serial.println("Failed to publish message from queue");
+        messageQueue.enqueue(message.topic, message.payload);
+        break;
+      }
+    }
+  } else {
+    Serial.print("MQTT connection failed, rc=");
+    Serial.println(mqttClient.state());
+    Serial.println("Retrying in 5 seconds");
+  }
 }
 void mqttLoop() {
   // Connect to MQTT if disconnected
   if (!mqttClient.connected()) {
-    Serial.println("Connecting to MQTT");
     mqttConnect();
-    if (mqttClient.connected()) {
-      Serial.println("Connected to MQTT");
-      // subscribe to topics
-      for (int i = 0; i < sizeof(SUBSCRIBE_TOPICS) / sizeof(SUBSCRIBE_TOPICS[0]); i++) {
-        mqttClient.subscribe(SUBSCRIBE_TOPICS[i]);
-      }
-      // publish messages from queue
-      while (!messageQueue.isEmpty()) {
-        Message message = messageQueue.dequeue();
-        mqttClient.publish(message.topic, message.payload);
-      }
-    }
+    mqttClient.loop();
   }
-  mqttClient.loop();
 }
 void rssiLoop() {
   // Update signal strengths
