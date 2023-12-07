@@ -18,9 +18,11 @@ struct State {
   bool pumpIsOn;
   bool lowFanIsSelected;
   bool pumpIsSelected;
+  bool setTempOverride;
 };
 
-
+char finalClientId[32];
+uint8_t mac[6];
 
 // pin assignments
 const int POT_PIN = 36;

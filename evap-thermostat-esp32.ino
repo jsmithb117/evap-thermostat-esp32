@@ -21,9 +21,6 @@ THB thb;
 DynamicQueue messageQueue; // stores mqtt pub-sub messages
 State state; // stores device state
 
-char finalClientId[32];
-uint8_t mac[6];
-
 
 void renderWifiSignalStrengthIndicator() {
   // Renders the WiFi signal strength indicator
@@ -208,11 +205,15 @@ void renderAllMemoized(bool force = false) {
     }
     lastHumidityPublishTime = millis();
   }
-  if (force || abs(state.setTempF - lastSetTemp) >= .15) {
+  if (force || state.setTempF != lastSetTemp) {
     static long lastSetTempPublishTime;
 
     renderSetTemp();
     lastSetTemp = state.setTempF;
+
+    if (millis() - lastSetTempPublishTime < 60000) { // ensure setTemp is published no more often than once per minute
+      return;
+    }
 
     if (!mqttClient.publish(SET_TEMP_TOPIC, String(state.setTempF).c_str())) {
       Serial.println("Failed to publish setTemp.  Adding message to queue.");
@@ -286,12 +287,13 @@ void thermostatInit() {
   digitalWrite(PUMP_PIN, LOW);
   digitalWrite(LOW_FAN_PIN, LOW);
   digitalWrite(HIGH_FAN_PIN, LOW);
-  state.setTempF = 72.0;
+  state.setTempF = 72.0F;
   state.lowFanIsOn = false;
   state.highFanIsOn = false;
   state.pumpIsOn = false;
   state.lowFanIsSelected = true;
   state.pumpIsSelected = true;
+  state.setTempOverride = false;
 }
 
 void turnLowFanOff() {
@@ -315,6 +317,7 @@ void turnHighFanOn() {
 void turnFanOff() {
   turnLowFanOff();
   turnHighFanOff();
+  renderFanDelay(-1); // clear fan delay
 }
 void turnFanOn() {
   // turns fan on if it's been at least 5 minutes since last fan on command
@@ -470,16 +473,23 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
     char *temp = (char *)payload;
     float newSetTempF = atof(temp);
 
-    // if newSetTempF is invalid, read setTempF from potentiometer
+
+    // if newSetTempF is valid, set setTempOverride to true and assign newSetTempF to setTempF
+    // else, set setTempOverride to false and assign setTempF to thb.readSetTempF()
     if (newSetTempF < 65.0 || newSetTempF > 85.0) {
-      newSetTempF = thb.readSetTempF();
+      Serial.print("Invalid setTemp received from MQTT.  Using current setTemp: ");
+      Serial.println(state.setTempF);
+      state.setTempOverride = false;
+      state.setTempF = thb.readSetTempF(&state.setTempOverride);
     } else {
+      Serial.print("Valid setTemp received from MQTT.  Using new setTemp: ");
+      Serial.println(newSetTempF);
+      state.setTempOverride = true;
       state.setTempF = newSetTempF;
     }
+    state.setTempF = newSetTempF;
     renderSetTemp();
     display.display();
-    Serial.print("Set temp updated to: ");
-    Serial.println(state.setTempF);
   }
 }
 void mqttInit() {
@@ -513,6 +523,8 @@ void mqttConnect() {
         Serial.println("Failed to publish message from queue");
         messageQueue.enqueue(message.topic, message.payload);
         break;
+      } else {
+        Serial.println("Published a queue message");
       }
     }
   } else {
@@ -525,14 +537,12 @@ void mqttLoop() {
   // Connect to MQTT if disconnected
   if (!mqttClient.connected()) {
     mqttConnect();
-    mqttClient.loop();
   }
+  mqttClient.loop();
 }
 void rssiLoop() {
   // Update signal strengths
   state.rawSignalStrength = WiFi.RSSI(); // reported to mqtt when mapped value changes
-  // Serial.print("Raw signal strength: ");
-  // Serial.println(state.rawSignalStrength);
   state.mappedSignalStrength = map(state.rawSignalStrength, -90, -40, 0, 4); // used to render signal strength indicator
 }
 
@@ -541,11 +551,9 @@ void debouncedPumpSelectHandler() {
   bool pumpSelectInput = !digitalRead(PUMP_SELECT_PIN); // invert input because INPUT_PULLUP
   static bool enableStateChange = false;
   if (pumpSelectInput && !enableStateChange) { // button pressed, enable state change
-    Serial.println("Pump select button pressed");
     enableStateChange = true;
   }
   if (!pumpSelectInput && enableStateChange) { // set/reset state on falling signal to prevent multiple state changes per button press
-    Serial.println("Pump select button released");
     state.pumpIsSelected = !state.pumpIsSelected;
     enableStateChange = false;
   }
@@ -555,43 +563,42 @@ void debouncedFanSelectHandler() {
   bool fanSelectInput = !digitalRead(FAN_SELECT_PIN); // invert input because INPUT_PULLUP
   static bool enableStateChange = false;
   if (fanSelectInput && !enableStateChange) { // button pressed, enable state change
-    Serial.println("Fan select button pressed");
     enableStateChange = true;
   }
   if (!fanSelectInput && enableStateChange) { // set/reset state on falling signal to prevent multiple state changes per button press
-    Serial.println("Fan select button released");
     state.lowFanIsSelected = !state.lowFanIsSelected;
     enableStateChange = false;
   }
 }
 void setup() {
-  // Serial setup
   Serial.begin(115200);
   while (!Serial) { delay(10); };
+
+  // generate clientId
   WiFi.macAddress(mac);
   sprintf(finalClientId, "%s%02X%02X%02X%02X%02X%02X", BASE_CLIENT_ID, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  // Display setup
+
   Serial.println("Display init");
   displayInit();
-  // WiFi setup
+
   Serial.println("WiFi init");
   wifiLoop();
-  // MQTT setup
+
   Serial.println("MQTT init");
   mqttInit();
-  // Thermostat setup
+
   Serial.println("Thermostat init");
   thermostatInit();
-  // RTC setup
+
   Serial.println("RTC init");
   rtcClient.init();
-  // THB setup
+
   Serial.println("THB init");
   thb.init(&state.tempF, &state.humidity, &state.pressure, &state.setTempF);
 }
 
 void loop() {
-  thb.readAll(&state.tempF, &state.humidity, &state.pressure, &state.setTempF);
+  thb.readAll(&state.tempF, &state.humidity, &state.pressure, &state.setTempF, &state.setTempOverride);
   displayLoop();
   wifiLoop();
   mqttLoop();
