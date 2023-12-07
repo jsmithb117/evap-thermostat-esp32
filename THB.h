@@ -8,10 +8,12 @@ private:
   Adafruit_BMP280 bmp280;
   float hum;
   float temp;
+  float setTemp;
 public:
   THB() {}
 
   void init(float* temperatureF, float* humidity, float* pressure, float* setTempF) {
+    Serial.println("Initializing THB");
     // Initialize AHT20 sensor
     if (!aht20.begin()) {
       Serial.println("Could not find AHT20 sensor, check wiring!");
@@ -23,13 +25,10 @@ public:
       Serial.println("Could not find BMP280 sensor, check wiring!");
       while (1);
     }
-    readAll(temperatureF, humidity, pressure, setTempF);
+    bool isOverride = false;
+    readAll(temperatureF, humidity, pressure, setTempF, &isOverride);
+    setTemp = *setTempF;
   }
-
-  // float readTemperatureC() {
-  //   // Read temperature in Celsius from AHT20 sensor
-  //   return aht20.readTemperature();
-  // }
 
   float readTemperatureF() {
     sensors_event_t humidity, temperature;
@@ -53,21 +52,30 @@ public:
     return round(bmp280.readPressure() / 100.0F * 10) / 10;
   }
 
-  float readSetTempF() {
+  float readSetTempF(bool* isOverride) {
     // Read set temperature from potentiometer
     float mappedSetTemp = map(analogRead(POT_PIN), 0, 4095, 650, 850) / 10.0F; // map potentiometer value to 65.0-85.0
+
+    // when server issues an UPDATE_SET_TEMP command, isOverride prevents the potentiometer from updating setTemp
+    // User removes the override by turning the potentiometer to its maximum value then setting the desired setTemp
+    if (*isOverride && mappedSetTemp != 85.0F) {
+      return setTemp;
+    }
+    *isOverride = false;
+    setTemp = mappedSetTemp;
     return mappedSetTemp;
   }
 
-  void readAll(float* temperatureF, float* humidity, float* pressure, float* setTempF) {
+  void readAll(float* temperatureF, float* humidity, float* pressure, float* setTempF, bool* isOverride) {
     // Read all sensor data
-    // temperatureC = readTemperatureC();
-    sensors_event_t hum, temp;
-    aht20.getEvent(&hum, &temp);// populate temp and humidity objects with fresh data
 
+    // if not overriden, update setTemp
+    if (isOverride) {
+      setTemp = *setTempF;
+    }
     *temperatureF = readTemperatureF();
     *humidity = readHumidity();
     *pressure = readPressure();
-    *setTempF = readSetTempF();
+    *setTempF = readSetTempF(isOverride);
   }
 };

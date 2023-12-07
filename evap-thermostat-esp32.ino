@@ -21,9 +21,6 @@ THB thb;
 DynamicQueue messageQueue; // stores mqtt pub-sub messages
 State state; // stores device state
 
-char finalClientId[32];
-uint8_t mac[6];
-
 
 void renderWifiSignalStrengthIndicator() {
   // Renders the WiFi signal strength indicator
@@ -64,9 +61,8 @@ String formatTemp(float value) {
   }
   return val;
 }
-String formatPumpTimer(int value) {
+String formatTimer(int value, int width) {
   String val = String(value);
-  const int width = 2;  // set the desired width
   while (val.length() < width) {
     val = " " + val;
   }
@@ -209,11 +205,15 @@ void renderAllMemoized(bool force = false) {
     }
     lastHumidityPublishTime = millis();
   }
-  if (force || abs(state.setTempF - lastSetTemp) >= .15) {
+  if (force || state.setTempF != lastSetTemp) {
     static long lastSetTempPublishTime;
 
     renderSetTemp();
     lastSetTemp = state.setTempF;
+
+    if (millis() - lastSetTempPublishTime < 60000) { // ensure setTemp is published no more often than once per minute
+      return;
+    }
 
     if (!mqttClient.publish(SET_TEMP_TOPIC, String(state.setTempF).c_str())) {
       Serial.println("Failed to publish setTemp.  Adding message to queue.");
@@ -231,7 +231,7 @@ void renderAllMemoized(bool force = false) {
     lastHighFanIsOn = state.highFanIsOn;
   }
   if (force || state.pumpIsOn != lastPumpIsOn) {
-    renderBar('P', !state.pumpIsSelected);
+    renderBar('P', !state.pumpIsOn);
     lastPumpIsOn = state.pumpIsOn;
   }
   if (force || state.lowFanIsSelected != lastLowFanIsSelected) {
@@ -287,12 +287,13 @@ void thermostatInit() {
   digitalWrite(PUMP_PIN, LOW);
   digitalWrite(LOW_FAN_PIN, LOW);
   digitalWrite(HIGH_FAN_PIN, LOW);
-  state.setTempF = 72.0;
+  state.setTempF = 72.0F;
   state.lowFanIsOn = false;
   state.highFanIsOn = false;
   state.pumpIsOn = false;
   state.lowFanIsSelected = true;
   state.pumpIsSelected = true;
+  state.setTempOverride = false;
 }
 
 void turnLowFanOff() {
@@ -316,20 +317,52 @@ void turnHighFanOn() {
 void turnFanOff() {
   turnLowFanOff();
   turnHighFanOff();
+  renderFanDelay(-1); // clear fan delay
 }
 void turnFanOn() {
+  // turns fan on if it's been at least 5 minutes since last fan on command
+  static long lastFanOnTime = -300000; // set as 5 minutes prior to startup so fan can engage immediately
+  renderFanDelay(-1); // clear fan delay
+
+  if (millis() - lastFanOnTime < 300000) {
+    if (!state.lowFanIsOn && !state.highFanIsOn) {
+      renderFanDelay(300000 - (millis() - lastFanOnTime));
+    }
+    return;
+  }
+  lastFanOnTime = millis();
+
+  // passed guards, turn fan on
   if (state.lowFanIsSelected) {
     turnLowFanOn();
   } else {
     turnHighFanOn();
   }
 }
+void renderFanDelay(int remainingMs) {
+  // Renders the fan delay in the lower right corner of the display, just above the pump delay
+  static int oldRemainingMs;
+
+  if (remainingMs != oldRemainingMs) {
+    oldRemainingMs = remainingMs;
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+    display.setCursor(SCREEN_WIDTH - 20, SCREEN_HEIGHT - 20);
+
+    if (remainingMs > 0) {
+      display.println(formatTimer(remainingMs / 1000, 3));
+    } else {
+      display.println("   ");
+    }
+  }
+}
 void turnPumpOff() {
   digitalWrite(PUMP_PIN, LOW);
   state.pumpIsOn = false;
+  renderPumpDelay(-1); // clear pump delay
 }
 void renderPumpDelay(int remainingMs) {
-  // Renders the pump delay in the lower right corner of the display
+  // Renders the pump delay in the lower right corner of the display, just below the fan delay
   static int oldRemainingMs;
 
   if (remainingMs != oldRemainingMs) {
@@ -339,7 +372,7 @@ void renderPumpDelay(int remainingMs) {
     display.setCursor(SCREEN_WIDTH - 20, SCREEN_HEIGHT - 10);
 
     if (remainingMs > 0) {
-      display.println(formatPumpTimer(remainingMs / 1000));
+      display.println(formatTimer((remainingMs / 1000), 2));
     } else {
       display.println("  ");
     }
@@ -347,7 +380,8 @@ void renderPumpDelay(int remainingMs) {
 
 }
 void turnPumpOn() {
-  static long lastPumpOnTime = -60000; // set as 1 minute prior to startup so pump can engage
+  static long lastPumpOnTime = -60000; // set as 1 minute prior to startup so pump can engage immediately
+  renderPumpDelay(-1); // clear pump delay
 
   if (state.humidity >= HIGH_HUMIDITY_THRESHOLD || !state.pumpIsSelected) { // ensure it doesn't get too humid indoors
     turnPumpOff();
@@ -359,13 +393,12 @@ void turnPumpOn() {
     }
     return;
   }
+
+  // passed guards, turn pump on
   if (state.pumpIsSelected && !state.pumpIsOn) {
     digitalWrite(PUMP_PIN, HIGH);
     state.pumpIsOn = true;
     lastPumpOnTime = millis();
-
-    // clear pump delay
-    renderPumpDelay(-1);
   }
 }
 void turnCoolerOn() {
@@ -432,17 +465,32 @@ void wifiLoop() {
 }
 
 void mqttCallback(char *topic, byte *payload, unsigned int length) {
+  // handles subscribed mqtt messages
   Serial.print("Message arrived from topic: ");
   Serial.println(topic);
-  // when UPDATE_SET_TEMP message is received, update setTemp
   if (strcmp(topic, UPDATE_SET_TEMP) == 0) {
     // convert payload to float and assign to setTempF
     char *temp = (char *)payload;
-    state.setTempF = atof(temp);
-    Serial.print("Set temp updated to: ");
-    Serial.println(state.setTempF);
-  }
+    float newSetTempF = atof(temp);
 
+
+    // if newSetTempF is valid, set setTempOverride to true and assign newSetTempF to setTempF
+    // else, set setTempOverride to false and assign setTempF to thb.readSetTempF()
+    if (newSetTempF < 65.0 || newSetTempF > 85.0) {
+      Serial.print("Invalid setTemp received from MQTT.  Using current setTemp: ");
+      Serial.println(state.setTempF);
+      state.setTempOverride = false;
+      state.setTempF = thb.readSetTempF(&state.setTempOverride);
+    } else {
+      Serial.print("Valid setTemp received from MQTT.  Using new setTemp: ");
+      Serial.println(newSetTempF);
+      state.setTempOverride = true;
+      state.setTempF = newSetTempF;
+    }
+    state.setTempF = newSetTempF;
+    renderSetTemp();
+    display.display();
+  }
 }
 void mqttInit() {
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
@@ -450,34 +498,51 @@ void mqttInit() {
   mqttConnect();
 }
 void mqttConnect() {
+  Serial.println("Connecting to MQTT");
+
+  static long lastMqttConnectAttempt = -5000; // set as 5 seconds prior to startup so mqtt can connect immediately
   const char* constClientId = finalClientId;
-  mqttClient.connect(constClientId, MQTT_USER, MQTT_PW);
+
+  // connect to mqtt, set last will and testament
+  if (lastMqttConnectAttempt + 5000 < millis() && mqttClient.connect(constClientId, MQTT_USER, MQTT_PW, STATUS_TOPIC, 0, 1, "0")) {
+    Serial.println("MQTT connected");
+    lastMqttConnectAttempt = millis();
+    // resubscribe to topics
+    for (int i = 0; i < sizeof(SUBSCRIBE_TOPICS) / sizeof(SUBSCRIBE_TOPICS[0]); i++) {
+      Serial.print("Subscribing to topic: ");
+      Serial.println(SUBSCRIBE_TOPICS[i]);
+      mqttClient.subscribe(SUBSCRIBE_TOPICS[i]);
+    }
+    // add status message to queue, signaling that this device is online
+    messageQueue.enqueue(STATUS_TOPIC, "1");
+    // publish messages from queue
+    while (!messageQueue.isEmpty()) {
+      Message message = messageQueue.dequeue();
+      if (!mqttClient.publish(message.topic, message.payload)) {
+        // publish failed, re-enqueue message and break to allow reconnect on next loop
+        Serial.println("Failed to publish message from queue");
+        messageQueue.enqueue(message.topic, message.payload);
+        break;
+      } else {
+        Serial.println("Published a queue message");
+      }
+    }
+  } else {
+    Serial.print("MQTT connection failed, rc=");
+    Serial.println(mqttClient.state());
+    Serial.println("Retrying in 5 seconds");
+  }
 }
 void mqttLoop() {
   // Connect to MQTT if disconnected
   if (!mqttClient.connected()) {
-    Serial.println("Connecting to MQTT");
     mqttConnect();
-    if (mqttClient.connected()) {
-      Serial.println("Connected to MQTT");
-      // subscribe to topics
-      for (int i = 0; i < sizeof(SUBSCRIBE_TOPICS) / sizeof(SUBSCRIBE_TOPICS[0]); i++) {
-        mqttClient.subscribe(SUBSCRIBE_TOPICS[i]);
-      }
-      // publish messages from queue
-      while (!messageQueue.isEmpty()) {
-        Message message = messageQueue.dequeue();
-        mqttClient.publish(message.topic, message.payload);
-      }
-    }
   }
   mqttClient.loop();
 }
 void rssiLoop() {
   // Update signal strengths
   state.rawSignalStrength = WiFi.RSSI(); // reported to mqtt when mapped value changes
-  // Serial.print("Raw signal strength: ");
-  // Serial.println(state.rawSignalStrength);
   state.mappedSignalStrength = map(state.rawSignalStrength, -90, -40, 0, 4); // used to render signal strength indicator
 }
 
@@ -486,11 +551,9 @@ void debouncedPumpSelectHandler() {
   bool pumpSelectInput = !digitalRead(PUMP_SELECT_PIN); // invert input because INPUT_PULLUP
   static bool enableStateChange = false;
   if (pumpSelectInput && !enableStateChange) { // button pressed, enable state change
-    Serial.println("Pump select button pressed");
     enableStateChange = true;
   }
   if (!pumpSelectInput && enableStateChange) { // set/reset state on falling signal to prevent multiple state changes per button press
-    Serial.println("Pump select button released");
     state.pumpIsSelected = !state.pumpIsSelected;
     enableStateChange = false;
   }
@@ -500,43 +563,42 @@ void debouncedFanSelectHandler() {
   bool fanSelectInput = !digitalRead(FAN_SELECT_PIN); // invert input because INPUT_PULLUP
   static bool enableStateChange = false;
   if (fanSelectInput && !enableStateChange) { // button pressed, enable state change
-    Serial.println("Fan select button pressed");
     enableStateChange = true;
   }
   if (!fanSelectInput && enableStateChange) { // set/reset state on falling signal to prevent multiple state changes per button press
-    Serial.println("Fan select button released");
     state.lowFanIsSelected = !state.lowFanIsSelected;
     enableStateChange = false;
   }
 }
 void setup() {
-  // Serial setup
   Serial.begin(115200);
   while (!Serial) { delay(10); };
+
+  // generate clientId
   WiFi.macAddress(mac);
   sprintf(finalClientId, "%s%02X%02X%02X%02X%02X%02X", BASE_CLIENT_ID, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  // Display setup
+
   Serial.println("Display init");
   displayInit();
-  // WiFi setup
+
   Serial.println("WiFi init");
   wifiLoop();
-  // MQTT setup
+
   Serial.println("MQTT init");
   mqttInit();
-  // Thermostat setup
+
   Serial.println("Thermostat init");
   thermostatInit();
-  // RTC setup
+
   Serial.println("RTC init");
   rtcClient.init();
-  // THB setup
+
   Serial.println("THB init");
   thb.init(&state.tempF, &state.humidity, &state.pressure, &state.setTempF);
 }
 
 void loop() {
-  thb.readAll(&state.tempF, &state.humidity, &state.pressure, &state.setTempF);
+  thb.readAll(&state.tempF, &state.humidity, &state.pressure, &state.setTempF, &state.setTempOverride);
   displayLoop();
   wifiLoop();
   mqttLoop();
