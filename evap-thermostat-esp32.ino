@@ -21,6 +21,17 @@ THB thb;
 DynamicQueue messageQueue; // stores mqtt pub-sub messages
 State state; // stores device state
 
+void renderPressure() {
+  // render pressure to the right of the "P" and to the left of the pumpDelayTimer
+  static float oldPressure;
+  if (state.pressure != oldPressure) {
+    oldPressure = state.pressure;
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+    display.setCursor(SCREEN_WIDTH - 65, SCREEN_HEIGHT - 10);
+    display.println(state.pressure);
+  }
+}
 
 void renderWifiSignalStrengthIndicator() {
   // Renders the WiFi signal strength indicator
@@ -264,7 +275,7 @@ void renderAllMemoized(bool force = false) {
     static long lastPressurePublishTime;
 
     lastPressure = state.pressure;
-
+    renderPressure();
     if (millis() - lastPressurePublishTime < 60000) { // ensure pressure is published no more often than once per minute
       return;
     }
