@@ -64,9 +64,8 @@ String formatTemp(float value) {
   }
   return val;
 }
-String formatPumpTimer(int value) {
+String formatTimer(int value, int width) {
   String val = String(value);
-  const int width = 2;  // set the desired width
   while (val.length() < width) {
     val = " " + val;
   }
@@ -318,10 +317,40 @@ void turnFanOff() {
   turnHighFanOff();
 }
 void turnFanOn() {
+  // turns fan on if it's been at least 5 minutes since last fan on command
+  static long lastFanOnTime = -300000; // set as 5 minutes prior to startup so fan can engage immediately
+  renderFanDelay(-1); // clear fan delay
+
+  if (millis() - lastFanOnTime < 300000) {
+    if (!state.lowFanIsOn && !state.highFanIsOn) {
+      renderFanDelay(300000 - (millis() - lastFanOnTime));
+    }
+    return;
+  }
+  lastFanOnTime = millis();
+
+  // passed guards, turn fan on
   if (state.lowFanIsSelected) {
     turnLowFanOn();
   } else {
     turnHighFanOn();
+  }
+}
+void renderFanDelay(int remainingMs) {
+  // Renders the fan delay in the lower right corner of the display, just above the pump delay
+  static int oldRemainingMs;
+
+  if (remainingMs != oldRemainingMs) {
+    oldRemainingMs = remainingMs;
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+    display.setCursor(SCREEN_WIDTH - 20, SCREEN_HEIGHT - 20);
+
+    if (remainingMs > 0) {
+      display.println(formatTimer(remainingMs / 1000, 3));
+    } else {
+      display.println("   ");
+    }
   }
 }
 void turnPumpOff() {
@@ -330,7 +359,7 @@ void turnPumpOff() {
   renderPumpDelay(-1); // clear pump delay
 }
 void renderPumpDelay(int remainingMs) {
-  // Renders the pump delay in the lower right corner of the display
+  // Renders the pump delay in the lower right corner of the display, just below the fan delay
   static int oldRemainingMs;
 
   if (remainingMs != oldRemainingMs) {
@@ -340,7 +369,7 @@ void renderPumpDelay(int remainingMs) {
     display.setCursor(SCREEN_WIDTH - 20, SCREEN_HEIGHT - 10);
 
     if (remainingMs > 0) {
-      display.println(formatPumpTimer(remainingMs / 1000));
+      display.println(formatTimer((remainingMs / 1000), 2));
     } else {
       display.println("  ");
     }
